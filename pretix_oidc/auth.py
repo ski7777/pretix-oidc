@@ -60,6 +60,7 @@ class OIDCAuthBackend(BaseAuthBackend):
             }
             if len(missing_endpoints)>0:
                 logger.error("Please specify " + ", ".join(sorted(missing_endpoints)) + " in [oidc] section in pretix.cfg")
+            # check whether we have at least one key for the issuer
             if  len(self.client.keyjar.get_issuer_keys(self.client.issuer)) == 0:
                 logger.error(
                     "Please specify jwks_uri in [oidc] section in pretix.cfg or ensure that the issuer supports jwks_uri discovery."
