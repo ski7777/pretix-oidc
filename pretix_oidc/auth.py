@@ -52,9 +52,12 @@ class OIDCAuthBackend(BaseAuthBackend):
                 "token_endpoint",
                 "userinfo_endpoint",
                 "end_session_endpoint"
-            } - set(
-                {k:v for k,v in self.client.__dict__.items() if k.endswith("_endpoint") and v is not None}.keys()
-            )
+            } - {
+                k
+                for k,v
+                in self.client.__dict__.items()
+                if k.endswith("_endpoint") and v is not None
+            }
             if len(missing_endpoints)>0:
                 logger.error("Please specify " + ", ".join(sorted(missing_endpoints)) + " in [oidc] section in pretix.cfg")
             if  len(self.client.keyjar.get_issuer_keys(self.client.issuer)) == 0:
