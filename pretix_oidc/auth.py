@@ -2,19 +2,26 @@ import logging
 import time
 from configparser import NoOptionError, NoSectionError
 from django.urls import reverse
+from django.dispatch import receiver
+from django.contrib.auth.signals import user_logged_out
+from django.contrib.sessions.models import Session
 from oic import rndstr
 from oic.oic import Client
 from oic.oic.message import (
     AuthorizationResponse,
     ProviderConfigurationResponse,
     RegistrationResponse,
+    BackChannelLogoutRequest,
 )
 from oic.utils.authn.client import CLIENT_AUTHN_METHOD
 from pretix.base.auth import BaseAuthBackend
 from pretix.settings import config
 
+from .models import OIDCSession
+
 logger = logging.getLogger(__name__)
 
+backchannel_logout_enabled = config.get("oidc", "backchannel_logout", fallback=False)
 
 class OIDCAuthBackend(BaseAuthBackend):
     def __init__(self):
@@ -153,5 +160,164 @@ class OIDCAuthBackend(BaseAuthBackend):
         }
 
         return [user_data, id_token]
+
+    def store_oidc_session(self, session_id, user, id_token):
+
+        if not backchannel_logout_enabled:
+            return
+
+        if id_token is None:
+            return
+
+        sid = id_token["sid"]
+        sub = id_token["sub"]
+        iss = id_token["iss"]
+        OIDCSession.objects.create(user=user,session_id=session_id,
+                                   oidc_session_id=sid, oidc_user_id=sub, oidc_issuer=iss)
+
+        logger.debug(f"Stored OIDC session for iss={iss} sub={sub} sid={sid} for session_id={session_id}")
+
+    def delete_oidc_session(self, user, oidc_session_id, session_id):
+
+        if session_id is None and user is None:
+            # we always need at least a user to delete oidc sessions if no session_id is given
+            return 0
+
+        filter_args = {}
+
+        if user is not None:
+            filter_args["user_id"] = user.id
+
+        if oidc_session_id is not None:
+            # if a specific oidc_session_id should be deleted
+            filter_args["oidc_session_id"] = oidc_session_id
+
+        if session_id is not None:
+            # if a specific session_id should be deleted
+            filter_args["session_id"] = session_id
+
+        oidc_sessions = list(OIDCSession.objects.filter(**filter_args))
+        deleted_oidc_sessions = 0
+        if len(oidc_sessions) > 0:
+            for oidcSession in oidc_sessions:
+                # delete all oidcSessions referenced by that user on logout
+                oidcSession.delete()
+                deleted_oidc_sessions += 1
+
+        return deleted_oidc_sessions
+
+    def process_backchannel_logout(self, request):
+        """
+        Process an OIDC back-channel logout request.
+
+        Validates the logout token, identifies matching OIDC sessions by issuer,
+        subject, and/or session ID, deletes associated Django sessions, and removes
+        persisted OIDCSession records. Returns a JSON-serializable status dict.
+        """
+        if not backchannel_logout_enabled:
+            return {
+                "status": "logout_error",
+                "error": "backchannel_logout_disabled",
+                "error_description": "OIDC Back-channel logout is not enabled for this backend",
+            }
+
+        try:
+            logout_token = self._parse_logout_token(request)
+        except Exception as err:
+            return {
+                "status": "logout_error",
+                "error": "invalid_request",
+                "error_description": "Failed to validate in logout_token: {}".format(err)
+            }
+
+        jti = logout_token.get("jti", None)
+        iss = logout_token.get("iss", None)
+        sub = logout_token.get("sub", None)
+        sid = logout_token.get("sid", None)
+        if sub is None and sid is not None:
+            return {
+                "status": "logout_error",
+                "error": "invalid_request",
+                "error_description": "Missing sub or sid claim in logout_token"
+            }
+
+        logger.debug(f"Processing OIDC back-channel logout for jti={jti} iss={iss} sub={sub} sid={sid}")
+
+        filter_args = {}
+        if sub is not None:
+            filter_args["oidc_user_id"] = sub
+        if sid is not None:
+            filter_args["oidc_session_id"] = sid
+        if iss is not None:
+            filter_args["oidc_issuer"] = iss
+
+        oidc_sessions = list(OIDCSession.objects.filter(**filter_args))
+
+        deleted_sessions_count = 0
+        deleted_oidc_sessions_count = 0
+        if len(oidc_sessions) > 0:
+            for oidcSession in oidc_sessions:
+                sessions = Session.objects.filter(session_key=oidcSession.session_id)
+                if len(sessions) > 0:
+                    for session in sessions:
+                        session.delete()
+                        deleted_sessions_count += 1
+                    user_logged_out.send(sender=OIDCAuthBackend.__class__, request=request, user=oidcSession.user)
+                oidcSession.delete()
+                deleted_oidc_sessions_count += 1
+
+        logger.debug(f"Deleted sessions for OIDC back-channel logout for jti={jti} iss={iss} sub={sub} sid={sid}. "
+                     f"deleted_sessions={deleted_sessions_count} deleted_oidc_sessions={deleted_oidc_sessions_count}")
+
+        return {"status": "logged_out"}
+
+    def _parse_logout_token(self, request):
+        """
+        Parse and validate an OIDC back-channel logout token.
+
+        Extracts the logout_token from the POST body and verifies it against the
+        configured client (audience, issuer, key material). Returns the decoded
+        logout_token claims on success or an error dict on failure.
+        """
+
+        req = BackChannelLogoutRequest().from_urlencoded(request.body.decode("utf-8"))
+        verify_args = {"aud": self.client.client_id, "iss": self.client.issuer, "keyjar": self.client.keyjar}
+
+        # parse / validate logout token
+        try:
+            req.verify(**verify_args)
+        except Exception as err:
+            return {
+                "status": "logout_error",
+                "error": "invalid_request",
+                "error_description": "Failed to validate in logout_token: {}".format(err)
+            }
+
+        return req["logout_token"]
+
+@receiver(user_logged_out)
+def on_user_logged_out(sender, request, user, **kwargs):
+    """
+    Cleanup OIDC sessions on user logout.
+
+    Removes all stored OIDCSession entries for the logged-out user, unless
+    back-channel logout is disabled or the logout was triggered internally
+    by the OIDC backend itself.
+    """
+    if not backchannel_logout_enabled:
+        return
+
+    # ignore our own back-channel logout signals
+    if sender == OIDCAuthBackend.__class__:
+        return
+
+    oidc_sessions = list(OIDCSession.objects.filter(user_id=user.id))
+    oidc_session_count = len(oidc_sessions)
+    if oidc_session_count > 0:
+        for oidcSession in oidc_sessions:
+            # delete all oidc_sessions referenced by that user on logout
+            oidcSession.delete()
+
+        logger.debug(f"Removed OIDCSessions for user logout. user_id={user.id} oidc_sessions_removed={oidc_session_count}.")
 
 auth_backend = OIDCAuthBackend()
