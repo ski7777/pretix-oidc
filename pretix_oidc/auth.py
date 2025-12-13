@@ -2,19 +2,26 @@ import logging
 import time
 from configparser import NoOptionError, NoSectionError
 from django.urls import reverse
+from django.dispatch import receiver
+from django.contrib.auth.signals import user_logged_out
+from django.contrib.sessions.models import Session
 from oic import rndstr
 from oic.oic import Client
 from oic.oic.message import (
     AuthorizationResponse,
     ProviderConfigurationResponse,
     RegistrationResponse,
+    BackChannelLogoutRequest,
 )
 from oic.utils.authn.client import CLIENT_AUTHN_METHOD
 from pretix.base.auth import BaseAuthBackend
 from pretix.settings import config
 
+from .models import OIDCSession
+
 logger = logging.getLogger(__name__)
 
+backchannel_logout_enabled = config.get("oidc", "backchannel_logout", fallback=False)
 
 class OIDCAuthBackend(BaseAuthBackend):
     def __init__(self):
