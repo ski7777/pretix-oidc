@@ -16,6 +16,7 @@ from oic.oic.message import (
 from oic.utils.authn.client import CLIENT_AUTHN_METHOD
 from pretix.base.auth import BaseAuthBackend
 from pretix.settings import config
+from django.core.cache import cache
 
 from .models import OIDCSession
 
@@ -161,4 +162,10 @@ class OIDCAuthBackend(BaseAuthBackend):
 
         return [user_data, id_token]
 
-auth_backend = OIDCAuthBackend()
+auth_backend_lifetime = config.getint("oidc", "lifetime", fallback=3600)
+
+def get_auth_backend():
+    auth_backend = cache.get('pretix_oidc_auth_backend', None)
+    if auth_backend is None:
+        auth_backend = OIDCAuthBackend()
+        cache.set('pretix_oidc_auth_backend', auth_backend, auth_backend_lifetime)

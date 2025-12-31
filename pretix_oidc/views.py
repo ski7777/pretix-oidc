@@ -16,12 +16,13 @@ from pretix.control.views.auth import process_login
 from pretix.helpers.compat import CompatDeleteView
 from pretix.settings import config
 
-from .auth import auth_backend  # NOQA
+from .auth import get_auth_backend
 from .forms import OIDCAssignmentRuleForm
 from .models import OIDCTeamAssignmentRule
 
 
 def oidc_callback(request):
+    auth_backend = get_auth_backend()
     user_data, id_token = auth_backend.process_callback(request)
 
     if user_data is None:
@@ -98,7 +99,7 @@ def oidc_backchannel_logout(request):
 
     See: https://openid.net/specs/openid-connect-backchannel-1_0.html
     """
-    logout_response = auth_backend.process_backchannel_logout(request)
+    logout_response = get_auth_backend().process_backchannel_logout(request)
     if logout_response.get("status") == "logout_error":
         return JsonResponse(data=logout_response, status=400)
 
