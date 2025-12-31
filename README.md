@@ -47,6 +47,9 @@ your `pretix.cfg`. Add the OIDC configuration to that same file in a new
     staff_value=
     # multiple staff_values can be provided, separated by commas. whitespaces are ignored.
     # staff_value=val_1,val_2
+    lifetime=
+    # lifetime in seconds of the OIDC backend object including JWKS cache
+    # default: 3600
 
 The callback URI on your pretix will be `/oidc/callback/`, enter this at the
 appropriate place in your OIDC provider.
