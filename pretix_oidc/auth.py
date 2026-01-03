@@ -1,6 +1,8 @@
 import logging
 import time
 from configparser import NoOptionError, NoSectionError
+from typing import Optional
+
 from django.urls import reverse
 from django.dispatch import receiver
 from django.contrib.auth.signals import user_logged_out
@@ -21,43 +23,45 @@ from django.core.cache import cache
 
 from .models import OIDCSession
 
-CACHE_KEY_BACKEND = 'pretix_oidc_auth_backend'
-CACHE_KEY_JWKS = 'pretix_oidc_auth_backend_jwks'
+CACHE_KEY = 'pretix_oidc_store'
 
 logger = logging.getLogger(__name__)
 
 backchannel_logout_enabled = config.get("oidc", "backchannel_logout", fallback=False)
 
 class OIDCAuthBackend(BaseAuthBackend):
-    def __init__(self):
+    def __init__(self, op_info: Optional[ProviderConfigurationResponse] = None, client_reg: Optional[RegistrationResponse] = None):
         try:
             self.title = config.get(
                 "oidc", "title", fallback="Login with OpenID connect"
             )
 
-            # setting config.get to None and ProviderConfigurationResponse handles empty string as unset we can use this
-            # object as override values
-            op_info = ProviderConfigurationResponse(
-                version="1.0",
-                issuer=config.get("oidc", "issuer"),
-                authorization_endpoint=config.get("oidc", "authorization_endpoint", fallback=""),
-                token_endpoint=config.get("oidc", "token_endpoint", fallback=""),
-                userinfo_endpoint=config.get("oidc", "userinfo_endpoint", fallback=""),
-                end_session_endpoint=config.get("oidc", "end_session_endpoint", fallback=""),
-                jwks_uri=config.get("oidc", "jwks_uri", fallback=""),
-            )
+            if op_info is None or client_reg is None:
+                # setting config.get to None and ProviderConfigurationResponse handles empty string as unset we can use this
+                # object as override values
+                op_info = ProviderConfigurationResponse(
+                    version="1.0",
+                    issuer=config.get("oidc", "issuer"),
+                    authorization_endpoint=config.get("oidc", "authorization_endpoint", fallback=""),
+                    token_endpoint=config.get("oidc", "token_endpoint", fallback=""),
+                    userinfo_endpoint=config.get("oidc", "userinfo_endpoint", fallback=""),
+                    end_session_endpoint=config.get("oidc", "end_session_endpoint", fallback=""),
+                    jwks_uri=config.get("oidc", "jwks_uri", fallback=""),
+                )
 
-            client_reg = RegistrationResponse(
-                client_id=config.get("oidc", "client_id"),
-                client_secret=config.get("oidc", "client_secret"),
-            )
+                client_reg = RegistrationResponse(
+                    client_id=config.get("oidc", "client_id"),
+                    client_secret=config.get("oidc", "client_secret"),
+                )
+
+            self.op_info, self.client_reg = op_info, client_reg
 
             self.client = Client(client_authn_method=CLIENT_AUTHN_METHOD)
             if not config.get("oidc", "skip_provider_discovery", fallback=False):
                 # If skip_provider_discovery is set, we do not fetch the provider config
                 # but use the provided information directly.
-                self.client.provider_config(op_info["issuer"])
-            self.client.handle_provider_config(op_info, op_info["issuer"])
+                self.client.provider_config(self.op_info["issuer"])
+            self.client.handle_provider_config(self.op_info, self.op_info["issuer"])
 
             missing_endpoints = {
                 "authorization_endpoint",
@@ -77,8 +81,7 @@ class OIDCAuthBackend(BaseAuthBackend):
                 logger.error(
                     "Please specify jwks_uri in [oidc] section in pretix.cfg or ensure that the issuer supports jwks_uri discovery."
                 )
-            self.client.handle_provider_config(op_info, op_info["issuer"])
-            self.client.store_registration_info(client_reg)
+            self.client.store_registration_info(self.client_reg)
             self.client.redirect_uris = [None]
 
             self.scopes = config.get("oidc", "scopes", fallback="openid").split(",")
@@ -325,26 +328,27 @@ def on_user_logged_out(sender, request, user, **kwargs):
 
         logger.debug(f"Removed OIDCSessions for user logout. user_id={user.id} oidc_sessions_removed={oidc_session_count}.")
 
+    def __getstate__(self):
+        return {
+            "op_info": self.op_info,
+            "client_reg": self.client_reg,
+            "jwks": {
+                issuer: self.client.keyjar.export_jwks(issuer=issuer, private=True)
+                for issuer in self.client.keyjar.issuer_keys.keys()
+            }
+        }
+
 auth_backend_lifetime = config.getint("oidc", "lifetime", fallback=3600)
 
 
 def get_auth_backend():
-    auth_backend = cache.get(CACHE_KEY_BACKEND, None)
-    jwks = cache.get(CACHE_KEY_JWKS, None)
-    logger.info(auth_backend)
-    if auth_backend is None or jwks is None:
+    data = cache.get(CACHE_KEY, None)
+    if data is None:
         auth_backend = OIDCAuthBackend()
-        jwks = {
-            issuer: auth_backend.client.keyjar.export_jwks(issuer=issuer, private=True)
-            for issuer in auth_backend.client.keyjar.issuer_keys.keys()
-        }
-        auth_backend.client.keyjar = None
         logger.info("Storing new auth backend in cache")
-        cache.set(CACHE_KEY_BACKEND, auth_backend, auth_backend_lifetime)
-        cache.set(CACHE_KEY_JWKS, jwks, auth_backend_lifetime)
+        cache.set(CACHE_KEY, auth_backend, auth_backend_lifetime)
     else:
         logger.info("Using cached auth backend")
-        auth_backend.client.keyjar= KeyJar()
-        for issuer, keys in jwks.items():
-            auth_backend.client.keyjar.import_jwks(keys, issuer=issuer)
+        # ToDo implement restore from data
+        auth_backend = OIDCAuthBackend()
     return auth_backend
