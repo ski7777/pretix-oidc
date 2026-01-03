@@ -341,7 +341,7 @@ def get_auth_backend():
         auth_backend.client.keyjar = None
         logger.info("Storing new auth backend in cache")
         cache.set(CACHE_KEY_BACKEND, auth_backend, auth_backend_lifetime)
-        cache.set(CACHE_KEY_JWKS, auth_backend, auth_backend_lifetime)
+        cache.set(CACHE_KEY_JWKS, jwks, auth_backend_lifetime)
     else:
         logger.info("Using cached auth backend")
         auth_backend.client.keyjar= KeyJar()
