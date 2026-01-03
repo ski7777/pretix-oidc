@@ -328,3 +328,4 @@ def get_auth_backend():
     if auth_backend is None:
         auth_backend = OIDCAuthBackend()
         cache.set('pretix_oidc_auth_backend', auth_backend, auth_backend_lifetime)
+    return auth_backend
