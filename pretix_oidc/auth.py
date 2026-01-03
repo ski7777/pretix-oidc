@@ -14,11 +14,15 @@ from oic.oic.message import (
     BackChannelLogoutRequest,
 )
 from oic.utils.authn.client import CLIENT_AUTHN_METHOD
+from oic.utils.keyio import KeyJar
 from pretix.base.auth import BaseAuthBackend
 from pretix.settings import config
 from django.core.cache import cache
 
 from .models import OIDCSession
+
+CACHE_KEY_BACKEND = 'pretix_oidc_auth_backend'
+CACHE_KEY_JWKS = 'pretix_oidc_auth_backend_jwks'
 
 logger = logging.getLogger(__name__)
 
@@ -323,11 +327,24 @@ def on_user_logged_out(sender, request, user, **kwargs):
 
 auth_backend_lifetime = config.getint("oidc", "lifetime", fallback=3600)
 
+
 def get_auth_backend():
-    auth_backend = cache.get('pretix_oidc_auth_backend', None)
+    auth_backend = cache.get(CACHE_KEY_BACKEND, None)
+    jwks = cache.get(CACHE_KEY_JWKS, None)
     logger.info(auth_backend)
-    if auth_backend is None:
+    if auth_backend is None or jwks is None:
         auth_backend = OIDCAuthBackend()
+        jwks = {
+            issuer: auth_backend.client.keyjar.export_jwks(issuer=issuer, private=True)
+            for issuer in auth_backend.client.keyjar.issuer_keys.keys()
+        }
+        auth_backend.client.keyjar = None
         logger.info("Storing new auth backend in cache")
-        cache.set('pretix_oidc_auth_backend', auth_backend, auth_backend_lifetime)
+        cache.set(CACHE_KEY_BACKEND, auth_backend, auth_backend_lifetime)
+        cache.set(CACHE_KEY_JWKS, auth_backend, auth_backend_lifetime)
+    else:
+        logger.info("Using cached auth backend")
+        auth_backend.client.keyjar= KeyJar()
+        for issuer, keys in jwks.items():
+            auth_backend.client.keyjar.import_jwks(keys, issuer=issuer)
     return auth_backend
