@@ -325,7 +325,9 @@ auth_backend_lifetime = config.getint("oidc", "lifetime", fallback=3600)
 
 def get_auth_backend():
     auth_backend = cache.get('pretix_oidc_auth_backend', None)
+    logger.info(auth_backend)
     if auth_backend is None:
         auth_backend = OIDCAuthBackend()
+        logger.info("Storing new auth backend in cache")
         cache.set('pretix_oidc_auth_backend', auth_backend, auth_backend_lifetime)
     return auth_backend
