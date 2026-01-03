@@ -329,6 +329,8 @@ def on_user_logged_out(sender, request, user, **kwargs):
         logger.debug(f"Removed OIDCSessions for user logout. user_id={user.id} oidc_sessions_removed={oidc_session_count}.")
 
     def __getstate__(self):
+        logger.info("Serializing OIDCAuthBackend for caching")
+        return {}
         return {
             "op_info": self.op_info,
             "client_reg": self.client_reg,
